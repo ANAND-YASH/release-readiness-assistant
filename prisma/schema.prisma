@@ -1,0 +1,178 @@
+// Data model for the Release Readiness Assistant.
+// ReleaseVersion rows are immutable snapshots: editing a release creates a new version.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ReleaseStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum AnalysisRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum StatementKind {
+  IMPACT
+  MISSING_INFO
+  UNSUPPORTED_CLAIM
+  RISK
+  TECH_SUMMARY
+  NONTECH_SUMMARY
+}
+
+/// RULE: produced by deterministic checks. AI: produced by the model and validated.
+enum StatementSource {
+  RULE
+  AI
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  EDITED
+  REJECTED
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+model Release {
+  id           String        @id @default(cuid())
+  name         String
+  product      String
+  targetDate   DateTime?
+  // Only changed by an explicit human decision, never by the AI workflow.
+  status       ReleaseStatus @default(DRAFT)
+  decidedBy    String?
+  decidedAt    DateTime?
+  decisionNote String?
+  /// Version the human decision was made for
+  decidedVersionNumber Int?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  versions ReleaseVersion[]
+  briefs   FinalBrief[]
+}
+
+model ReleaseVersion {
+  id            String   @id @default(cuid())
+  releaseId     String
+  versionNumber Int
+  /// ReleasePackage snapshot (lib/schema/release-package.ts)
+  package       Json
+  /// { [itemId]: sha256 } computed at save time
+  itemHashes    Json
+  packageHash   String
+  /// ValidationResult computed at save time
+  validation    Json
+  changeNote    String?
+  createdAt     DateTime @default(now())
+
+  release      Release              @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  analysisRuns AnalysisRun[]
+  statements   GeneratedStatement[]
+  briefs       FinalBrief[]
+
+  @@unique([releaseId, versionNumber])
+}
+
+model AnalysisRun {
+  id               String            @id @default(cuid())
+  versionId        String
+  status           AnalysisRunStatus @default(RUNNING)
+  provider         String
+  model            String
+  promptVersion    String
+  inputHash        String
+  latencyMs        Int?
+  promptTokens     Int?
+  completionTokens Int?
+  attempts         Int               @default(0)
+  error            String?
+  rawOutput        Json?
+  /// Deterministic pre-check findings that were passed to the model as facts
+  precheck         Json?
+  createdAt        DateTime          @default(now())
+
+  version    ReleaseVersion       @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  statements GeneratedStatement[]
+
+  @@index([versionId])
+}
+
+model GeneratedStatement {
+  id            String        @id @default(cuid())
+  runId         String
+  versionId     String
+  kind          StatementKind
+  source        StatementSource @default(AI)
+  /// impact level (IMPACT) or severity (RISK); null for other kinds
+  level         String?
+  /// Generated text as produced (by the model or a deterministic rule); never overwritten
+  aiContent     String
+  /// Kind-specific structured fields, e.g. { userGroups } for IMPACT, { claimText, reason } for UNSUPPORTED_CLAIM
+  metadata      Json?
+  editedContent String?
+  /// [{ itemId, itemHash }]
+  citations     Json
+  reviewStatus  ReviewStatus  @default(PENDING)
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  /// Optional reviewer note, recorded with a rejection
+  reviewNote    String?
+  order         Int
+  createdAt     DateTime      @default(now())
+
+  run     AnalysisRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  version ReleaseVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([versionId])
+  @@index([runId])
+}
+
+model FinalBrief {
+  id           String   @id @default(cuid())
+  releaseId    String
+  versionId    String
+  markdown     String
+  /// ids of the GeneratedStatements included in the brief
+  statementIds Json
+  generatedBy  String
+  createdAt    DateTime @default(now())
+
+  release Release        @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  version ReleaseVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([releaseId])
+}
+
+model AppLog {
+  id        String   @id @default(cuid())
+  level     LogLevel
+  event     String
+  requestId String?
+  releaseId String?
+  context   Json?
+  createdAt DateTime @default(now())
+
+  @@index([event])
+  @@index([releaseId])
+  @@index([createdAt])
+}
